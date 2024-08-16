@@ -20,10 +20,114 @@ from said.util.mesh import create_mesh, get_submesh, load_mesh
 from said.util.parser import parse_list
 
 
+def check_exist(file_path):
+    if not os.path.exists(file_path):
+        print('{} not exist'.format(file_path))
+        return False
+
+    return True
+
+
+def get_frames(image_dir, if_return_npy=False):
+    image_list = glob.glob(os.path.join(image_dir, '*.jpg')) + glob.glob(os.path.join(image_dir, '*.png'))
+    image_list.sort()
+
+    return image_list
+
+
+def get_data_paths(group_names, data_dirs, augment_nums=None, lest_video_frames=30, mode='train'):
+    data_dic_name_list = []
+    person_id = 0
+    sentence_id = 0
+
+    for data_dir, group_name, augment_num in zip(data_dirs, group_names, augment_nums):
+        print('== start loading data from {} and group {} =='.format(data_dir, group_name))
+
+        person_id += 1
+
+        group_dir = os.path.join(data_dir, group_name)
+        if mode == 'train':
+            file_path = os.path.join(group_dir, 'train.txt')
+        else:
+            file_path = os.path.join(group_dir, 'val.txt')
+
+        print('== start loading data from {} =='.format(file_path))
+
+        with open(file_path,'r', encoding='utf-8') as f:
+            data = f.readlines()
+            data = data * augment_num
+            print('== {} data num is {} =='.format(group_name, len(data)))
+
+        # crop_frames_path = os.path.join(os.path.dirname(file_path), '3dmm_crop_frames')
+        cpem_path = os.path.join(group_dir, 'cpem')
+        images_path = os.path.join(cpem_path, 'train_images')
+        masks_path = os.path.join(cpem_path, 'train_masks')
+        origin_images_path = os.path.join(cpem_path, 'origin_images')
+        roi_path = os.path.join(cpem_path, 'roi')
+        # for A2 model train
+        audio_dir = os.path.join(group_dir, 'audio')
+        bs_dir = os.path.join(cpem_path, 'bs')
+
+        for line in tqdm(data):
+            prefix = line.strip()
+            train_image_frame_dir = os.path.join(images_path, prefix)
+            mask_frame_dir = os.path.join(masks_path, prefix)
+            ori_image_dir = os.path.join(origin_images_path, prefix)
+            audio_path = os.path.join(audio_dir, prefix + '.wav')
+            if not os.path.exists(audio_path):
+                print('== {} not exist =='.format(audio_path))
+                continue
+
+            bs_npy_path = os.path.join(bs_dir, prefix + '.npy')
+            if not os.path.exists(bs_npy_path):
+                print('== {} not exist =='.format(bs_npy_path))
+                continue
+            
+            sentence_id += 1
+
+            roi_pickle_path = os.path.join(roi_path, prefix + '.pkl')
+            # roi_list = get_roi_list(roi_pickle_path)
+            roi_list = []
+            # check exist
+            if check_exist(train_image_frame_dir) and check_exist(mask_frame_dir) and check_exist(ori_image_dir):
+                train_image_list, mask_image_list, ori_image_list = get_frames(train_image_frame_dir), get_frames(mask_frame_dir), get_frames(ori_image_dir)
+                frame_num = min([len(train_image_list), len(mask_image_list), len(ori_image_list)])
+                roi_list = [p.replace('train_images', 'roi').replace('.png', '.npy') for p in train_image_list]
+
+                # check frames
+                if frame_num < lest_video_frames:
+                    print('=====> {} frames less than {}'.format(prefix, lest_video_frames))
+                    continue
+
+                # if len(roi_list) != frame_num:
+                #     print('=====> {} roi list len less than {}'.format(len(roi_list), frame_num))
+                #     continue
+
+                key_str = group_name + '|' + prefix
+                # data_dic_name_list.append(key_str)
+                # roi_npy_path = os.path.join(roi_path, prefix + '.npy')
+                # roi_npy_path = os.path.join(roi_path, prefix + '.pkl')
+
+                data = BlendVOCADataPath(
+                            person_id=person_id,
+                            sentence_id=sentence_id,
+                            audio=audio_path,
+                            blendshape_coeffs=bs_npy_path,
+                        )
+                data_dic_name_list.append(data)
+                
+            else:
+                continue
+
+    random.shuffle(data_dic_name_list)
+    print('finish loading')
+
+    return data_dic_name_list
+
+
 @dataclass
 class DataItem:
     """Dataclass for the data item"""
-
     waveform: Optional[torch.FloatTensor]  # (audio_seq_len,)
     blendshape_coeffs: Optional[
         torch.FloatTensor
@@ -71,79 +175,7 @@ class BlendVOCADataPath:
 class BlendVOCADataset(ABC, Dataset):
     """Abstract class of BlendVOCA dataset"""
 
-    person_ids_train = [
-        "FaceTalk_170725_00137_TA",
-        "FaceTalk_170728_03272_TA",
-        "FaceTalk_170811_03274_TA",
-        "FaceTalk_170904_00128_TA",
-        "FaceTalk_170904_03276_TA",
-        "FaceTalk_170912_03278_TA",
-        "FaceTalk_170913_03279_TA",
-        "FaceTalk_170915_00223_TA",
-    ]
-
-    person_ids_val = [
-        "FaceTalk_170811_03275_TA",
-        "FaceTalk_170908_03277_TA",
-    ]
-
-    person_ids_test = [
-        "FaceTalk_170731_00024_TA",
-        "FaceTalk_170809_00138_TA",
-    ]
-
-    sentence_ids = list(range(1, 41))
-
     fps = 60
-
-    default_blendshape_classes = [
-        "jawForward",
-        "jawLeft",
-        "jawRight",
-        "jawOpen",
-        "mouthClose",
-        "mouthFunnel",
-        "mouthPucker",
-        "mouthLeft",
-        "mouthRight",
-        "mouthSmileLeft",
-        "mouthSmileRight",
-        "mouthFrownLeft",
-        "mouthFrownRight",
-        "mouthDimpleLeft",
-        "mouthDimpleRight",
-        "mouthStretchLeft",
-        "mouthStretchRight",
-        "mouthRollLower",
-        "mouthRollUpper",
-        "mouthShrugLower",
-        "mouthShrugUpper",
-        "mouthPressLeft",
-        "mouthPressRight",
-        "mouthLowerDownLeft",
-        "mouthLowerDownRight",
-        "mouthUpperUpLeft",
-        "mouthUpperUpRight",
-        "cheekPuff",
-        "cheekSquintLeft",
-        "cheekSquintRight",
-        "noseSneerLeft",
-        "noseSneerRight",
-    ]
-
-    default_blendshape_classes_mirror_pair = [
-        ("jawLeft", "jawRight"),
-        ("mouthLeft", "mouthRight"),
-        ("mouthSmileLeft", "mouthSmileRight"),
-        ("mouthFrownLeft", "mouthFrownRight"),
-        ("mouthDimpleLeft", "mouthDimpleRight"),
-        ("mouthStretchLeft", "mouthStretchRight"),
-        ("mouthPressLeft", "mouthPressRight"),
-        ("mouthLowerDownLeft", "mouthLowerDownRight"),
-        ("mouthUpperUpLeft", "mouthUpperUpRight"),
-        ("cheekSquintLeft", "cheekSquintRight"),
-        ("noseSneerLeft", "noseSneerRight"),
-    ]
 
     @abstractmethod
     def __len__(self) -> int:
@@ -172,73 +204,14 @@ class BlendVOCADataset(ABC, Dataset):
         """
         pass
 
-    def get_data_paths(
-        self,
-        audio_dir: str,
-        blendshape_coeffs_dir: Optional[str],
-        person_ids: List[str],
-        repeat_regex: str = "(-.+)?",
-    ) -> List[BlendVOCADataPath]:
-        """Return the list of the data paths
+    
+    def get_blend_npy(self, blend_fpath):
+        blend_npy = np.load(blend_fpath)
+        # select mouth blend npy
+        blend_npy = blend_npy[:, -27:]
 
-        Parameters
-        ----------
-        audio_dir : str
-            Directory of the audio data
-        blendshape_coeffs_dir : Optional[str]
-            Directory of the blendshape coefficients
-        person_ids : List[str]
-            List of the person ids
-        repeat_regex: str, optional
-            Regex for checking the repeated files, by default "(-.+)?"
+        return torch.from_numpy(blend_npy).float()
 
-        Returns
-        -------
-        List[BlendVOCADataPath]
-            List of the BlendVOCADataPath objects
-        """
-        data_paths = []
-
-        for pid in person_ids:
-            audio_id_dir = os.path.join(audio_dir, pid)
-            coeffs_id_dir = (
-                os.path.join(blendshape_coeffs_dir, pid)
-                if blendshape_coeffs_dir
-                else None
-            )
-
-            for sid in self.sentence_ids:
-                filename_base = f"sentence{sid:02}"
-                audio_path = os.path.join(audio_id_dir, f"{filename_base}.wav")
-
-                if not os.path.exists(audio_path):
-                    continue
-
-                if coeffs_id_dir and os.path.exists(coeffs_id_dir):
-                    coeffs_pattern = re.compile(f"^{filename_base}{repeat_regex}\.csv$")
-                    filename_list = [
-                        s for s in os.listdir(coeffs_id_dir) if coeffs_pattern.match(s)
-                    ]
-                    for filename in filename_list:
-                        coeffs_path = os.path.join(coeffs_id_dir, filename)
-                        if os.path.exists(coeffs_path):
-                            data = BlendVOCADataPath(
-                                person_id=pid,
-                                sentence_id=sid,
-                                audio=audio_path,
-                                blendshape_coeffs=coeffs_path,
-                            )
-                            data_paths.append(data)
-                else:
-                    data = BlendVOCADataPath(
-                        person_id=pid,
-                        sentence_id=sid,
-                        audio=audio_path,
-                        blendshape_coeffs=None,
-                    )
-                    data_paths.append(data)
-
-        return data_paths
 
     @staticmethod
     def collate_fn(examples: List[DataItem]) -> DataBatch:
@@ -363,7 +336,6 @@ class BlendVOCADataset(ABC, Dataset):
 
 class BlendVOCATrainDataset(BlendVOCADataset):
     """Train dataset for VOCA-ARKit"""
-
     def __init__(
         self,
         audio_dir: str,
@@ -371,16 +343,16 @@ class BlendVOCATrainDataset(BlendVOCADataset):
         blendshape_deltas_path: Optional[str],
         landmarks_path: Optional[str],
         sampling_rate: int,
-        window_size_min: int = 120,
+        window_size_min: int = 25,
         uncond_prob: float = 0.1,
         zero_prob: float = 0,
         hflip: bool = True,
         delay: bool = True,
         delay_thres: int = 1,
-        classes: List[str] = BlendVOCADataset.default_blendshape_classes,
-        classes_mirror_pair: List[
-            Tuple[str, str]
-        ] = BlendVOCADataset.default_blendshape_classes_mirror_pair,
+        # classes: List[str] = BlendVOCADataset.default_blendshape_classes,
+        # classes_mirror_pair: List[
+        #     Tuple[str, str]
+        # ] = BlendVOCADataset.default_blendshape_classes_mirror_pair,
         preload: bool = True,
     ) -> None:
         """Constructor of the class
@@ -424,53 +396,24 @@ class BlendVOCATrainDataset(BlendVOCADataset):
         self.hflip = hflip
         self.delay = delay
         self.delay_thres = delay_thres
-        self.classes = classes
-        self.classes_mirror_pair = classes_mirror_pair
+        
+        data_dirs = ['/data/xxx']
+        group_names = ['xxx']
+        # data augmentation
+        augment_nums = [1]
 
-        self.mirror_indices = []
-        self.mirror_indices_flip = []
-        for pair in self.classes_mirror_pair:
-            index_l = self.classes.index(pair[0])
-            index_r = self.classes.index(pair[1])
-            self.mirror_indices.extend([index_l, index_r])
-            self.mirror_indices_flip.extend([index_r, index_l])
-
-        self.data_paths = self.get_data_paths(
-            audio_dir, blendshape_coeffs_dir, self.person_ids_train
-        )
-
-        self.blendshape_deltas = (
-            load_blendshape_deltas(blendshape_deltas_path)
-            if blendshape_deltas_path
-            else None
-        )
-
-        self.landmarks = parse_list(landmarks_path, int) if landmarks_path else None
+        self.data_paths = get_data_paths(group_names, data_dirs, augment_nums, lest_video_frames=30, mode='train')
+        self.max_bs_lens = 1000
 
         self.preload = preload
         self.data_preload = []
-        self.blendshape_deltas_preload = {}
         if self.preload:
-            for data in self.data_paths:
+            print('Preloading data...')
+            for data in tqdm(self.data_paths):
                 waveform = load_audio(data.audio, self.sampling_rate)
-                blendshape_coeffs = load_blendshape_coeffs(data.blendshape_coeffs)
+                blendshape_coeffs = self.get_blend_npy(data.blendshape_coeffs)
                 self.data_preload.append((waveform, blendshape_coeffs))
 
-                if data.person_id not in self.blendshape_deltas_preload:
-                    blendshape_delta = (
-                        torch.FloatTensor(
-                            np.stack(
-                                list(self.blendshape_deltas[data.person_id].values()),
-                                axis=0,
-                            )
-                        )
-                        if self.blendshape_deltas
-                        else None
-                    )
-                    if self.landmarks and self.blendshape_deltas:
-                        blendshape_delta = blendshape_delta[:, self.landmarks, :]
-
-                    self.blendshape_deltas_preload[data.person_id] = blendshape_delta
 
     def __len__(self) -> int:
         return len(self.data_paths)
@@ -482,30 +425,17 @@ class BlendVOCATrainDataset(BlendVOCADataset):
             data_pre = self.data_preload[index]
             waveform = data_pre[0]
             blendshape_coeffs = data_pre[1]
-            blendshape_delta = self.blendshape_deltas_preload[data.person_id]
         else:
             waveform = load_audio(data.audio, self.sampling_rate)
-            blendshape_coeffs = load_blendshape_coeffs(data.blendshape_coeffs)
-            blendshape_delta = (
-                torch.FloatTensor(
-                    np.stack(
-                        list(self.blendshape_deltas[data.person_id].values()), axis=0
-                    )
-                )
-                if self.blendshape_deltas
-                else None
-            )
-            if self.landmarks and self.blendshape_deltas:
-                blendshape_delta = blendshape_delta[:, self.landmarks, :]
+            blendshape_coeffs = self.get_blend_npy(data.blendshape_coeffs)
+
+        # cut too long waveformif blendshape_coeffs.shape[0] > self.max_bs_lens
+        if blendshape_coeffs.shape[0] > self.max_bs_lens:
+            blendshape_coeffs = blendshape_coeffs[:self.max_bs_lens, :]
+            waveform = waveform[:self.max_bs_lens * 4 * 160]
 
         # Random uncondition for classifier-free guidance
         cond = random.uniform(0, 1) > self.uncond_prob
-
-        # Augmentation - hflip
-        if self.hflip and random.uniform(0, 1) < 0.5:
-            blendshape_coeffs[:, self.mirror_indices] = blendshape_coeffs[
-                :, self.mirror_indices_flip
-            ]
 
         # Random zero-out
         if random.uniform(0, 1) < self.zero_prob:
@@ -516,7 +446,7 @@ class BlendVOCATrainDataset(BlendVOCADataset):
             waveform=waveform,
             blendshape_coeffs=blendshape_coeffs,
             cond=cond,
-            blendshape_delta=blendshape_delta,
+            blendshape_delta=None,
         )
 
     def collate_fn(self, examples: List[DataItem]) -> DataBatch:
@@ -533,6 +463,7 @@ class BlendVOCATrainDataset(BlendVOCADataset):
             DataBatch object
         """
         conds = torch.BoolTensor([item.cond for item in examples])
+
         blendshape_deltas = None
         if len(examples) > 0 and examples[0].blendshape_delta is not None:
             blendshape_deltas = torch.stack(
@@ -552,11 +483,12 @@ class BlendVOCATrainDataset(BlendVOCADataset):
 
         bc_min_len = min([coeffs.shape[0] for coeffs in blendshape_coeffss])
         window_size = random.randrange(self.window_size_min, bc_min_len + 1)
-        waveform_window_len = (self.sampling_rate * window_size) // self.fps
+
+        # waveform_window_len = (self.sampling_rate * window_size) // self.fps
+        waveform_window_len = window_size * 4 * self.sampling_rate // 100
         batch_size = len(waveforms)
 
-        half_window_size = window_size // 2
-        half_waveform_window_len = waveform_window_len // 2
+        half_window_size = window_size
 
         waveforms_windows = []
         coeffs_windows = []
@@ -568,45 +500,31 @@ class BlendVOCATrainDataset(BlendVOCADataset):
             blendshape_len = blendshape_coeffs.shape[0]
             num_blendshape = blendshape_coeffs.shape[1]
 
+            # print('waveform: ', waveform.shape)
+            # normalize the waveformif blendshape_len * 4 > waveform.shape[0] // 160:
+            if blendshape_len * 4 > waveform.shape[0] // 160:
+                waveform = F.pad(waveform, (0, blendshape_len * 4 * 160 - waveform.shape[0]))
+            else:
+                waveform = waveform[:blendshape_len * 4 * 160]
+
+            # 
             bdx = random.randint(
-                -half_window_size, max(0, blendshape_len - half_window_size - 1)
+                0, max(0, blendshape_len - window_size - 1)
             )
-            wdx = (self.sampling_rate * bdx) // self.fps
-            if self.delay and random.uniform(0, 1) < 0.5:
-                wdx = random.randint(wdx - self.delay_thres, wdx + self.delay_thres)
 
-            bdx_update = bdx + half_window_size
-            coeffs_window = F.pad(
-                blendshape_coeffs.unsqueeze(0),
-                (0, 0, half_window_size, window_size),
-                "replicate",
-            ).squeeze(0)[bdx_update : bdx_update + window_size, :]
+            bdx_update = bdx
+            coeffs_window = blendshape_coeffs[bdx_update : bdx_update + window_size, :]
 
-            wdx_update = max(0, wdx + half_waveform_window_len + self.delay_thres)
-            waveform_window = F.pad(
-                waveform.unsqueeze(0),
-                (
-                    half_waveform_window_len + self.delay_thres,
-                    waveform_window_len + self.delay_thres,
-                ),
-                "replicate",
-            ).squeeze(0)[wdx_update : wdx_update + waveform_window_len]
-
-            """
-            bdx = random.randint(0, max(0, blendshape_len - window_size))
-            wdx = (self.sampling_rate * bdx) // self.fps
-            if self.delay and random.uniform(0, 1) < 0.5:
-                wdelays = list(range(max(wdx - self.delay_thres, 0), wdx)) + list(
-                    range(wdx + 1, wdx + self.delay_thres + 1)
-                )
-                wdx = random.choice(wdelays)
-
-            coeffs_window = blendshape_coeffs[bdx : bdx + window_size, :]
-
-            waveform_tmp = waveform[wdx : wdx + waveform_window_len]
-            waveform_window = torch.full((waveform_window_len,), waveform_tmp[-1])
-            waveform_window[: waveform_tmp.shape[0]] = waveform_tmp[:]
-            """
+            if self.delay:
+                if random.uniform(0, 1) < 0.5:
+                    waveform_window = waveform[bdx_update * 4 * self.sampling_rate // 100 : (bdx_update + window_size) * 4 * self.sampling_rate // 100]
+                    waveform_window = F.pad(waveform_window, (2 * self.delay_thres * 160, 0), mode='constant', value=0)
+                else:
+                    waveform_window = waveform[bdx_update * 4 * self.sampling_rate // 100 : (bdx_update + window_size) * 4 * self.sampling_rate // 100]
+                    waveform_window = F.pad(waveform_window, (0, 2 * self.delay_thres * 160), mode='constant', value=0)
+            else:
+                waveform_window = waveform[bdx_update * 4 * self.sampling_rate // 100 : (bdx_update + window_size) * 4 * self.sampling_rate // 100]
+                waveform_window = F.pad(waveform_window, (160, 160), mode='constant', value=0)
 
             waveforms_windows.append(waveform_window)
             coeffs_windows.append(coeffs_window)
@@ -637,10 +555,10 @@ class BlendVOCAValDataset(BlendVOCADataset):
         uncond_prob: float = 0.1,
         zero_prob: float = 0,
         hflip: bool = True,
-        classes: List[str] = BlendVOCADataset.default_blendshape_classes,
-        classes_mirror_pair: List[
-            Tuple[str, str]
-        ] = BlendVOCADataset.default_blendshape_classes_mirror_pair,
+        # classes: List[str] = BlendVOCADataset.default_blendshape_classes,
+        # classes_mirror_pair: List[
+        #     Tuple[str, str]
+        # ] = BlendVOCADataset.default_blendshape_classes_mirror_pair,
         preload: bool = True,
     ) -> None:
         """Constructor of the class
@@ -671,57 +589,32 @@ class BlendVOCAValDataset(BlendVOCADataset):
             Load the data in the constructor, by default True
         """
         self.sampling_rate = sampling_rate
+        self.window_size_min = 25
         self.uncond_prob = uncond_prob
         self.zero_prob = zero_prob
 
         self.hflip = hflip
-        self.classes = classes
-        self.classes_mirror_pair = classes_mirror_pair
+        # self.delay = delay
+        # self.delay_thres = delay_thres
+        
+        data_dirs = ['/data/xxx']
+        group_names = ['xxx']
+        # data augmentation
+        augment_nums = [1]
+        
+        self.max_bs_lens = 1000
 
-        self.mirror_indices = []
-        self.mirror_indices_flip = []
-        for pair in self.classes_mirror_pair:
-            index_l = self.classes.index(pair[0])
-            index_r = self.classes.index(pair[1])
-            self.mirror_indices.extend([index_l, index_r])
-            self.mirror_indices_flip.extend([index_r, index_l])
-
-        self.data_paths = self.get_data_paths(
-            audio_dir, blendshape_coeffs_dir, self.person_ids_val
-        )
-
-        self.blendshape_deltas = (
-            load_blendshape_deltas(blendshape_deltas_path)
-            if blendshape_deltas_path
-            else None
-        )
-
-        self.landmarks = parse_list(landmarks_path, int) if landmarks_path else None
+        self.data_paths = get_data_paths(group_names, data_dirs, augment_nums, lest_video_frames=30, mode='val')
 
         self.preload = preload
         self.data_preload = []
-        self.blendshape_deltas_preload = {}
         if self.preload:
-            for data in self.data_paths:
+            print('Preloading data...')
+            for data in tqdm(self.data_paths):
                 waveform = load_audio(data.audio, self.sampling_rate)
-                blendshape_coeffs = load_blendshape_coeffs(data.blendshape_coeffs)
+                blendshape_coeffs = self.get_blend_npy(data.blendshape_coeffs)
                 self.data_preload.append((waveform, blendshape_coeffs))
 
-                if data.person_id not in self.blendshape_deltas_preload:
-                    blendshape_delta = (
-                        torch.FloatTensor(
-                            np.stack(
-                                list(self.blendshape_deltas[data.person_id].values()),
-                                axis=0,
-                            )
-                        )
-                        if self.blendshape_deltas
-                        else None
-                    )
-                    if self.landmarks and self.blendshape_deltas:
-                        blendshape_delta = blendshape_delta[:, self.landmarks, :]
-
-                    self.blendshape_deltas_preload[data.person_id] = blendshape_delta
 
     def __len__(self) -> int:
         return len(self.data_paths)
@@ -733,44 +626,112 @@ class BlendVOCAValDataset(BlendVOCADataset):
             data_pre = self.data_preload[index]
             waveform = data_pre[0]
             blendshape_coeffs = data_pre[1]
-            blendshape_delta = self.blendshape_deltas_preload[data.person_id]
         else:
             waveform = load_audio(data.audio, self.sampling_rate)
-            blendshape_coeffs = load_blendshape_coeffs(data.blendshape_coeffs)
-            blendshape_delta = (
-                torch.FloatTensor(
-                    np.stack(
-                        list(self.blendshape_deltas[data.person_id].values()), axis=0
-                    )
-                )
-                if self.blendshape_deltas
-                else None
-            )
-            if self.landmarks and self.blendshape_deltas:
-                blendshape_delta = blendshape_delta[:, self.landmarks, :]
+            blendshape_coeffs = self.get_blend_npy(data.blendshape_coeffs)
 
-        blendshape_len = blendshape_coeffs.shape[0]
-        waveform_window_len = (self.sampling_rate * blendshape_len) // self.fps
-
-        # Adjust the waveform window
-        waveform_tmp = waveform[:waveform_window_len]
-
-        waveform_window = torch.zeros(waveform_window_len)
-        waveform_window[: waveform_tmp.shape[0]] = waveform_tmp[:]
+        # cut too long waveformif blendshape_coeffs.shape[0] > self.max_bs_lens
+        if blendshape_coeffs.shape[0] > self.max_bs_lens:
+            blendshape_coeffs = blendshape_coeffs[:self.max_bs_lens, :]
+            waveform = waveform[:self.max_bs_lens * 4 * 160]
 
         # Random uncondition for classifier-free guidance
         cond = random.uniform(0, 1) > self.uncond_prob
 
         # Random zero-out
         if random.uniform(0, 1) < self.zero_prob:
-            waveform_window = torch.zeros_like(waveform_window)
+            waveform = torch.zeros_like(waveform)
             blendshape_coeffs = torch.zeros_like(blendshape_coeffs)
 
         return DataItem(
-            waveform=waveform_window,
+            waveform=waveform,
             blendshape_coeffs=blendshape_coeffs,
             cond=cond,
-            blendshape_delta=blendshape_delta,
+            blendshape_delta=None,
+        )
+
+    def collate_fn(self, examples: List[DataItem]) -> DataBatch:
+        """Collate function which is used for dataloader
+
+        Parameters
+        ----------
+        examples : List[DataItem]
+            List of the outputs of __getitem__
+
+        Returns
+        -------
+        DataBatch
+            DataBatch object
+        """
+        conds = torch.BoolTensor([item.cond for item in examples])
+
+        blendshape_deltas = None
+        if len(examples) > 0 and examples[0].blendshape_delta is not None:
+            blendshape_deltas = torch.stack(
+                [item.blendshape_delta for item in examples]
+            )
+
+        person_ids = None
+        if len(examples) > 0 and examples[0].person_id is not None:
+            person_ids = [item.person_id for item in examples]
+
+        sentence_ids = None
+        if len(examples) > 0 and examples[0].sentence_id is not None:
+            sentence_ids = [item.sentence_id for item in examples]
+
+        waveforms = [item.waveform for item in examples]
+        blendshape_coeffss = [item.blendshape_coeffs for item in examples]
+
+        bc_min_len = min([coeffs.shape[0] for coeffs in blendshape_coeffss])
+        window_size = bc_min_len
+
+        # waveform_window_len = (self.sampling_rate * window_size) // self.fps
+        waveform_window_len = window_size * 4 * self.sampling_rate // 100
+        batch_size = len(waveforms)
+
+        half_window_size = window_size
+
+        waveforms_windows = []
+        coeffs_windows = []
+        # Random-select the window
+        for idx in range(batch_size):
+            waveform = waveforms[idx]
+            blendshape_coeffs = blendshape_coeffss[idx]
+
+            blendshape_len = blendshape_coeffs.shape[0]
+            num_blendshape = blendshape_coeffs.shape[1]
+
+            # print('waveform: ', waveform.shape)
+            # normalize the waveformif blendshape_len * 4 > waveform.shape[0] // 160:
+            if blendshape_len * 4 > waveform.shape[0] // 160:
+                waveform = F.pad(waveform, (0, blendshape_len * 4 * 160 - waveform.shape[0]))
+            else:
+                waveform = waveform[:blendshape_len * 4 * 160]
+
+            # 
+            bdx = random.randint(
+                0, max(0, blendshape_len - window_size - 1)
+            )
+
+            bdx_update = bdx
+            coeffs_window = blendshape_coeffs[bdx_update : bdx_update + window_size, :]
+
+            waveform_window = waveform[bdx_update * 4 * self.sampling_rate // 100 : (bdx_update + window_size) * 4 * self.sampling_rate // 100]
+            waveform_window = F.pad(waveform_window, (160, 160), mode='constant', value=0)
+
+            waveforms_windows.append(waveform_window)
+            coeffs_windows.append(coeffs_window)
+
+        coeffs_final = torch.stack(coeffs_windows)
+        waveforms_final = [np.array(waveform) for waveform in waveforms_windows]
+
+        return DataBatch(
+            waveform=waveforms_final,
+            blendshape_coeffs=coeffs_final,
+            cond=conds,
+            blendshape_delta=blendshape_deltas,
+            person_ids=person_ids,
+            sentence_ids=sentence_ids,
         )
 
 
@@ -894,7 +855,7 @@ class BlendVOCAEvalDataset(BlendVOCADataset):
         blendshape_coeffs_dir: str,
         blendshape_deltas_path: Optional[str],
         sampling_rate: int,
-        classes: List[str] = BlendVOCADataset.default_blendshape_classes,
+        # classes: List[str] = BlendVOCADataset.default_blendshape_classes,
         preload: bool = True,
         repeat_regex: str = "(-.+)?",
     ):
@@ -927,34 +888,15 @@ class BlendVOCAEvalDataset(BlendVOCADataset):
             repeat_regex,
         )
 
-        self.blendshape_deltas = (
-            load_blendshape_deltas(blendshape_deltas_path)
-            if blendshape_deltas_path
-            else None
-        )
-
         self.preload = preload
         self.data_preload = []
-        self.blendshape_deltas_preload = {}
+
         if self.preload:
             for data in self.data_paths:
                 waveform = load_audio(data.audio, self.sampling_rate)
                 blendshape_coeffs = load_blendshape_coeffs(data.blendshape_coeffs)
                 self.data_preload.append((waveform, blendshape_coeffs))
 
-                if data.person_id not in self.blendshape_deltas_preload:
-                    blendshape_delta = (
-                        torch.FloatTensor(
-                            np.stack(
-                                list(self.blendshape_deltas[data.person_id].values()),
-                                axis=0,
-                            )
-                        )
-                        if self.blendshape_deltas
-                        else None
-                    )
-
-                    self.blendshape_deltas_preload[data.person_id] = blendshape_delta
 
     def __len__(self) -> int:
         return len(self.data_paths)
@@ -1097,10 +1039,10 @@ class BlendVOCAVAEDataset(BlendVOCADataset):
         zero_prob: float = 0,
         hflip: bool = True,
         dataset_type: str = "train",
-        classes: List[str] = BlendVOCADataset.default_blendshape_classes,
-        classes_mirror_pair: List[
-            Tuple[str, str]
-        ] = BlendVOCADataset.default_blendshape_classes_mirror_pair,
+        # classes: List[str] = BlendVOCADataset.default_blendshape_classes,
+        # classes_mirror_pair: List[
+        #     Tuple[str, str]
+        # ] = BlendVOCADataset.default_blendshape_classes_mirror_pair,
     ) -> None:
         """Constructor of the class
 
@@ -1191,50 +1133,50 @@ class BlendVOCAVAEDataset(BlendVOCADataset):
             blendshape_coeffs=coeffs_window,
         )
 
-    def get_data_paths(
-        self,
-        blendshape_coeffs_dir: str,
-        person_ids: List[str],
-    ) -> List[BlendVOCADataPath]:
-        """Return the list of the data paths
+    # def get_data_paths(
+    #     self,
+    #     blendshape_coeffs_dir: str,
+    #     person_ids: List[str],
+    # ) -> List[BlendVOCADataPath]:
+    #     """Return the list of the data paths
 
-        Parameters
-        ----------
-        blendshape_coeffs_dir : str
-            Directory of the blendshape coefficients
-        person_ids : List[str]
-            List of the person ids
+    #     Parameters
+    #     ----------
+    #     blendshape_coeffs_dir : str
+    #         Directory of the blendshape coefficients
+    #     person_ids : List[str]
+    #         List of the person ids
 
-        Returns
-        -------
-        List[BlendVOCADataPath]
-            List of the BlendVOCADataPath objects
-        """
-        data_paths = []
+    #     Returns
+    #     -------
+    #     List[BlendVOCADataPath]
+    #         List of the BlendVOCADataPath objects
+    #     """
+    #     data_paths = []
 
-        for pid in person_ids:
-            coeffs_id_dir = os.path.join(blendshape_coeffs_dir, pid)
-            if coeffs_id_dir is None or not os.path.exists(coeffs_id_dir):
-                continue
+    #     for pid in person_ids:
+    #         coeffs_id_dir = os.path.join(blendshape_coeffs_dir, pid)
+    #         if coeffs_id_dir is None or not os.path.exists(coeffs_id_dir):
+    #             continue
 
-            for sid in self.sentence_ids:
-                filename_base = f"sentence{sid:02}"
-                coeffs_pattern = re.compile(f"^{filename_base}(-.+)?\.csv$")
-                filename_list = [
-                    s for s in os.listdir(coeffs_id_dir) if coeffs_pattern.match(s)
-                ]
-                for filename in filename_list:
-                    coeffs_path = os.path.join(coeffs_id_dir, filename)
-                    if os.path.exists(coeffs_path):
-                        data = BlendVOCADataPath(
-                            person_id=pid,
-                            sentence_id=sid,
-                            audio=None,
-                            blendshape_coeffs=coeffs_path,
-                        )
-                        data_paths.append(data)
+    #         for sid in self.sentence_ids:
+    #             filename_base = f"sentence{sid:02}"
+    #             coeffs_pattern = re.compile(f"^{filename_base}(-.+)?\.csv$")
+    #             filename_list = [
+    #                 s for s in os.listdir(coeffs_id_dir) if coeffs_pattern.match(s)
+    #             ]
+    #             for filename in filename_list:
+    #                 coeffs_path = os.path.join(coeffs_id_dir, filename)
+    #                 if os.path.exists(coeffs_path):
+    #                     data = BlendVOCADataPath(
+    #                         person_id=pid,
+    #                         sentence_id=sid,
+    #                         audio=None,
+    #                         blendshape_coeffs=coeffs_path,
+    #                     )
+    #                     data_paths.append(data)
 
-        return data_paths
+    #     return data_paths
 
     @staticmethod
     def collate_fn(examples: List[DataItem]) -> DataBatch:
