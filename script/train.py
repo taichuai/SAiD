@@ -3,6 +3,15 @@
 import argparse
 from dataclasses import dataclass
 import os
+import sys
+
+os.environ['CUDA_VISIBLE_DEVICES'] = '4'
+os.environ['NCCL_P2P_DISABLE'] = '1'
+os.environ['NCCL_IB_DISABLE'] = '1'
+
+cur_path = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(cur_path, ".."))
+
 import pathlib
 from typing import Optional
 from accelerate import Accelerator
@@ -23,7 +32,6 @@ class LossStepOutput:
     """
     Dataclass for the losses at each step
     """
-
     predict: torch.FloatTensor  # MAE loss for the predicted output
     velocity: torch.FloatTensor  # MAE loss for the velocity
     vertex: Optional[torch.FloatTensor]  # MAE loss for the reconstructed vertex
@@ -34,7 +42,6 @@ class LossEpochOutput:
     """
     Dataclass for the averaged losses at each epoch
     """
-
     total: float = 0  # Averaged total loss
     predict: float = 0  # Averaged prediction loss
     velocity: float = 0  # Averaged velocity loss
@@ -80,10 +87,13 @@ def random_noise_loss(
     curr_batch_size = len(waveform)
     window_size = blendshape_coeffs.shape[1]
 
+    # print('waveform: ', waveform[0].shape)
     waveform_processed = said_model.process_audio(waveform).to(device)
     random_timesteps = said_model.get_random_timesteps(curr_batch_size).to(device)
 
+    # print('window_size: ', window_size)
     cond_embedding = said_model.get_audio_embedding(waveform_processed, window_size)
+    # print('wavel shape', waveform_processed.shape, 'cond embedding shape', cond_embedding.shape, 'coeff and latent', blendshape_coeffs.shape, coeff_latents.shape)
     uncond_embedding = said_model.null_cond_emb.repeat(
         curr_batch_size, cond_embedding.shape[1], 1
     )
@@ -92,13 +102,14 @@ def random_noise_loss(
     audio_embedding = cond_embedding * cond_mask + uncond_embedding * torch.logical_not(
         cond_mask
     )
-
     noise_dict = said_model.add_noise(coeff_latents, random_timesteps)
     noisy_latents = noise_dict.noisy_sample
     noise = noise_dict.noise
     velocity = noise_dict.velocity
 
+    # print('noisy_latents: ', noisy_latents.shape, 'random: ', random_timesteps, 'audio embedding: ', audio_embedding.shape)
     pred = said_model(noisy_latents, random_timesteps, audio_embedding)
+    # print('pred: ', pred.shape)
 
     # Set answer corresponding to prediction_type
     answer = None
@@ -166,6 +177,7 @@ def train_epoch(
     weight_vertex: float,
     prediction_type: str = "epsilon",
     ema_model: Optional[EMAModel] = None,
+    epoch: int = 0,
 ) -> LossEpochOutput:
     """Train the SAiD model one epoch.
 
@@ -210,7 +222,8 @@ def train_epoch(
         "loss_vertex": 0,
     }
     train_total_num = 0
-    for data in train_dataloader:
+    for data in tqdm(train_dataloader, desc="Train (epoch {}".format(epoch), total=len(train_dataloader)):
+        optimizer.zero_grad()
         curr_batch_size = len(data.waveform)
 
         with accelerator.accumulate(said_model):
@@ -300,30 +313,29 @@ def validate_epoch(
     }
     val_total_num = 0
     with torch.no_grad():
-        for _ in range(num_repeat):
-            for data in val_dataloader:
-                curr_batch_size = len(data.waveform)
-                losses = random_noise_loss(
-                    said_model, data, std, device, prediction_type
+        for data in tqdm(val_dataloader, desc="Validation batch", total=len(val_dataloader)):
+            curr_batch_size = len(data.waveform)
+            losses = random_noise_loss(
+                said_model, data, std, device, prediction_type
+            )
+
+            loss = losses.predict + weight_vel * losses.velocity
+            if losses.vertex is not None:
+                loss += weight_vertex * losses.vertex
+
+            val_total_losses["loss"] += loss.item() * curr_batch_size
+            val_total_losses["loss_predict"] += (
+                losses.predict.item() * curr_batch_size
+            )
+            val_total_losses["loss_velocity"] += (
+                losses.velocity.item() * curr_batch_size
+            )
+            if losses.vertex is not None:
+                val_total_losses["loss_vertex"] += (
+                    losses.vertex.item() * curr_batch_size
                 )
 
-                loss = losses.predict + weight_vel * losses.velocity
-                if losses.vertex is not None:
-                    loss += weight_vertex * losses.vertex
-
-                val_total_losses["loss"] += loss.item() * curr_batch_size
-                val_total_losses["loss_predict"] += (
-                    losses.predict.item() * curr_batch_size
-                )
-                val_total_losses["loss_velocity"] += (
-                    losses.velocity.item() * curr_batch_size
-                )
-                if losses.vertex is not None:
-                    val_total_losses["loss_vertex"] += (
-                        losses.vertex.item() * curr_batch_size
-                    )
-
-                val_total_num += curr_batch_size
+            val_total_num += curr_batch_size
 
     val_avg_losses = LossEpochOutput(
         total=val_total_losses["loss"] / val_total_num,
@@ -388,23 +400,23 @@ def main() -> None:
     parser.add_argument(
         "--window_size_min",
         type=int,
-        default=120,
+        default=25,
         help="Minimum window size of the blendshape coefficients sequence at training",
     )
     parser.add_argument(
-        "--batch_size", type=int, default=8, help="Batch size at training"
+        "--batch_size", type=int, default=24, help="Batch size at training"
     )
     parser.add_argument(
-        "--epochs", type=int, default=100000, help="The number of epochs"
+        "--epochs", type=int, default=10000, help="The number of epochs"
     )
     parser.add_argument(
         "--num_warmup_epochs",
         type=int,
-        default=5000,
+        default=2,
         help="The number of warmup epochs",
     )
     parser.add_argument(
-        "--num_workers", type=int, default=0, help="The number of workers"
+        "--num_workers", type=int, default=8, help="The number of workers"
     )
     parser.add_argument(
         "--learning_rate", type=float, default=1e-5, help="Learning rate"
@@ -446,13 +458,13 @@ def main() -> None:
         help="Ema decay rate",
     )
     parser.add_argument(
-        "--val_period", type=int, default=200, help="Period of validating model"
+        "--val_period", type=int, default=1, help="Period of validating model"
     )
     parser.add_argument(
-        "--val_repeat", type=int, default=50, help="Number of repetition of val dataset"
+        "--val_repeat", type=int, default=10, help="Number of repetition of val dataset"
     )
     parser.add_argument(
-        "--save_period", type=int, default=200, help="Period of saving model"
+        "--save_period", type=int, default=10, help="Period of saving model"
     )
     args = parser.parse_args()
 
@@ -501,6 +513,8 @@ def main() -> None:
         "facebook/wav2vec2-base-960h"
     )
 
+    print(f"Audio_encoder Model loaded successfully from facebook/wav2vec2-base-960h")
+
     # Load data
     train_dataset = BlendVOCATrainDataset(
         audio_dir=audio_dir,
@@ -510,7 +524,7 @@ def main() -> None:
         sampling_rate=said_model.sampling_rate,
         window_size_min=window_size_min,
         uncond_prob=uncond_prob,
-        preload=True,
+        preload=False,
     )
     val_dataset = BlendVOCAValDataset(
         audio_dir=audio_dir,
@@ -534,13 +548,16 @@ def main() -> None:
         sampler=train_sampler,
         collate_fn=train_dataset.collate_fn,
         num_workers=num_workers,
+        prefetch_factor=4,
     )
+
     val_dataloader = DataLoader(
         val_dataset,
-        batch_size=1,
+        batch_size=8,
         shuffle=False,
-        collate_fn=BlendVOCAValDataset.collate_fn,
+        collate_fn=val_dataset.collate_fn,
         num_workers=num_workers,
+        prefetch_factor=4,
     )
 
     # Initialize the optimzier - freeze audio encoder
@@ -577,6 +594,9 @@ def main() -> None:
     # Prepare the EMA model
     ema_model = EMAModel(said_model.parameters(), decay=ema_decay) if ema else None
 
+    # for data in train_dataloader:
+    #     # print('data', data)
+
     # Set the progress bar
     progress_bar = tqdm(
         range(1, epochs + 1), disable=not accelerator.is_local_main_process
@@ -596,6 +616,7 @@ def main() -> None:
             weight_vertex=weight_vertex,
             prediction_type=prediction_type,
             ema_model=ema_model,
+            epoch=epoch,
         )
 
         # Log
@@ -640,6 +661,8 @@ def main() -> None:
             progress_bar.set_postfix(**logs)
 
         if accelerator.is_main_process:
+            log_str = 'Epoch: {} |'.format(epoch) + ', '.join(['{}: {:.4f}'.format(k, v) for k, v in logs.items()])
+            print('Logs: {}'.format(log_str))
             accelerator.log(logs, step=epoch)
 
         accelerator.wait_for_everyone()
@@ -663,3 +686,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# python script/train.py --output_dir /data2/liujie/train_log/said_logs
