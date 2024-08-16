@@ -473,6 +473,7 @@ def main() -> None:
     )
 
     output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
     prediction_type = args.prediction_type
     window_size_min = args.window_size_min
     batch_size = args.batch_size
