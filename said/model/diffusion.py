@@ -519,8 +519,8 @@ class SAID_UNet1D(SAID):
 
         # Denoiser
         self.denoiser = UNet1DConditionModel(
-            in_channels=in_channels,
-            out_channels=in_channels,
+            in_channels=27,
+            out_channels=27,
             cross_attention_dim=self.feature_dim
             if self.feature_dim > 0
             else self.audio_config.hidden_size,
