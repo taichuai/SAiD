@@ -2,8 +2,14 @@
 """
 import argparse
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+
 from diffusers import DDIMScheduler
 import torch
+import numpy as np
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+
 from said.model.diffusion import SAID_UNet1D
 from said.util.audio import fit_audio_unet, load_audio
 from said.util.blendshape import (
@@ -41,13 +47,13 @@ def main():
     parser.add_argument(
         "--output_image_path",
         type=str,
-        default="../out.png",
+        default="./out.png",
         help="Path of the image of the output blendshape coefficients",
     )
     parser.add_argument(
         "--intermediate_dir",
         type=str,
-        default="../interm",
+        default="./interm",
         help="Saving directory of the intermediate outputs",
     )
     parser.add_argument(
@@ -59,7 +65,7 @@ def main():
     parser.add_argument(
         "--save_image",
         type=bool,
-        default=False,
+        default=True,
         help="Save the output blendshape coefficients as an image",
     )
     parser.add_argument(
@@ -107,6 +113,7 @@ def main():
     )
     parser.add_argument(
         "--init_sample_path",
+        default=None,
         type=str,
         help="Path of the initial sample file (csv format)",
     )
@@ -155,6 +162,7 @@ def main():
         prediction_type=prediction_type,
     )
     said_model.load_state_dict(torch.load(weights_path, map_location=device))
+    print('Loaded SAID model.')
     said_model.to(device)
     said_model.eval()
 
@@ -162,13 +170,24 @@ def main():
     waveform = load_audio(audio_path, said_model.sampling_rate)
     # waveform = torch.zeros_like(waveform)
 
-    # Fit the size of waveform
-    fit_output = fit_audio_unet(waveform, said_model.sampling_rate, fps, divisor_unet)
-    waveform = fit_output.waveform
-    window_len = fit_output.window_size
+    # Process the waveform
+    audio_4_len = waveform.shape[0] // (160 * 4)
+    waveform = waveform[:audio_4_len * (160 * 4)]# Fit the size of waveform
+    
+    window_len = audio_4_len
+    waveform = np.pad(waveform, (160, 160), mode='constant', constant_values=(0, 0))# Fit the size of waveform
+    waveform = torch.from_numpy(waveform) # Fit the size of waveform
 
+    # Fit the size of waveform
+    # fit_output = fit_audio_unet(waveform, said_model.sampling_rate, fps, divisor_unet)
+    # waveform = fit_output.waveform
+    #  window_len= fit_output.window_size
+
+    print("window_len: ", window_len)
+    print('waveform', waveform.shape)
     # Process the waveform
     waveform_processed = said_model.process_audio(waveform).to(device)
+    print('waveform_processed', waveform_processed.shape)# Inference
 
     # Inference
     with torch.no_grad():
@@ -186,32 +205,37 @@ def main():
         )
 
     result = output.result[0, :window_len].cpu().numpy()
+    
+    print('result shape: ', result.shape)
+    
+    np.save(output_path, result)
 
-    save_blendshape_coeffs(
-        coeffs=result,
-        classes=BlendVOCADataset.default_blendshape_classes,
-        output_path=output_path,
-    )
+    # save_blendshape_coeffs(
+    #     coeffs=result,
+    #     classes=BlendVOCADataset.default_blendshape_classes,
+    #     output_path=output_path,
+    # )
 
     # Save coeffs as an image
     if save_image:
         save_blendshape_coeffs_image(result, output_image_path)
 
     # Save intermediates
-    if save_intermediate:
-        for t, interm in enumerate(reversed(output.intermediates)):
-            interm_coeffs = interm[0, :window_len].cpu().numpy()
-            timestep = t + 1
+    # if save_intermediate:
+    #     os.makedirs(intermediate_dir, exist_ok=True)
+    #     for t, interm in enumerate(reversed(output.intermediates)):
+    #         interm_coeffs = interm[0, :window_len].cpu().numpy()
+    #         timestep = t + 1
 
-            save_blendshape_coeffs_image(
-                interm_coeffs, os.path.join(intermediate_dir, f"{timestep}.png")
-            )
+    #         save_blendshape_coeffs_image(
+    #             interm_coeffs, os.path.join(intermediate_dir, f"{timestep}.png")
+    #         )
 
-            save_blendshape_coeffs(
-                coeffs=interm_coeffs,
-                classes=BlendVOCADataset.default_blendshape_classes,
-                output_path=os.path.join(intermediate_dir, f"{timestep}.csv"),
-            )
+    #         save_blendshape_coeffs(
+    #             coeffs=interm_coeffs,
+    #             classes=BlendVOCADataset.default_blendshape_classes,
+    #             output_path=os.path.join(intermediate_dir, f"{timestep}.csv"),
+    #         )
 
 
 if __name__ == "__main__":
